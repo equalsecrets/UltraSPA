@@ -1,0 +1,2380 @@
+/**
+ * UltraSPA - Advanced SPA Navigation System
+ * Kombinasi dari fitur prefetching canggih dengan navigasi SPA yang mulus
+ * Developer / Code make by hanhaoyu.com
+ * @version 1.0.0
+ * @license MIT
+ */
+(function() {
+  'use strict';
+
+  /**
+   * Konfigurasi lengkap yang dapat disesuaikan
+   */
+  window.ULTRA_SPA_CONFIG = {
+    // Core settings
+    enabled: true,
+    
+    // Database settings
+    db: {
+      name: 'UltraSpaDB',
+      version: 1,
+      storeName: 'prefetched_pages',
+      enabled: true
+    },
+
+    // Prefetch settings
+    prefetch: {
+      classes: ["fast", "loadcepat", "onfast", "prefetch"],
+      priorityClasses: ["high-priority", "critical"],
+      maxLinks: 50,
+      prefetchOnHover: true,
+      prefetchOnVisible: true,
+      prefetchDelay: 100, // ms between prefetch requests
+      hoverDelay: 75,     // ms to wait before prefetching on hover
+      mouseMoveThreshold: 5, // px of mouse movement to trigger prefetch
+    },
+    
+    // Cache settings
+    cache: {
+      enabled: true,
+      strategy: 'indexeddb', // 'memory', 'indexeddb', 'both'
+      memoryLimit: 20,      // Max number of pages in memory
+      inMemoryTTL: 300000,  // 5 minutes
+      persistentTTL: 86400000, // 24 hours
+      maxCacheSize: 50 * 1024 * 1024, // 50MB
+      cleanupInterval: 30 * 60 * 1000, // 30 minutes
+    },
+    
+    // Compression settings
+    compression: {
+      enabled: true,
+      threshold: 1024, // Only compress content larger than 1KB
+    },
+    
+    // Content versioning
+    versioning: {
+      enabled: true,
+      checkNewVersion: true,
+      forceUpdate: false,
+      interval: 5 * 60 * 1000, // 5 minutes
+    },
+
+    // Navigation settings
+    navigation: {
+      enabled: true,
+      replaceUrls: true, // Use history.pushState
+      updateHead: true,  // Update <head> elements
+      scrollRestoration: true,
+      focusRestoration: true,
+    },
+    
+    // UI settings
+    ui: {
+      enableTransitions: true,
+      transitionDuration: 300, // ms
+      transitionClass: 'ultra-spa-transition',
+      showProgressBar: true,
+      progressBarColor: '#4285f4',
+      progressBarHeight: '3px',
+      showLoadingIndicator: true,
+      loadingIndicatorColor: '#4285f4',
+      loadingIndicatorPosition: 'top', // 'top', 'center', 'bottom'
+      announcePageChanges: true, // For accessibility
+    },
+    
+    // Selectors
+    selectors: {
+      content: ['main', '#content', '#main', '.content', '[role="main"]', 'body'],
+      ignore: ['.no-prefetch', '[data-no-prefetch]'],
+      head: ['meta[name="description"]', 'meta[property^="og:"]', 'link[rel="canonical"]'],
+      updateScripts: true, // Update inline scripts from fetched page
+    },
+    
+    // Network settings
+    network: {
+      retryAttempts: 3,
+      retryDelay: 1000,
+      timeout: 10000,
+      concurrentFetch: 3,
+      respectDataSaver: true,
+      lowBandwidthThreshold: 0.7, // Mbps
+      disablePrefetchOnLowBandwidth: true,
+      headers: {
+        'X-Requested-With': 'UltraSPA'
+      },
+    },
+    
+    // Service Worker settings
+    serviceWorker: {
+      enabled: true,
+      path: '/ultra-spa-sw.js',
+      scope: '/',
+      updateInterval: 24 * 60 * 60 * 1000, // 24 hours
+      strategies: {
+        navigations: 'network-first',
+        prefetches: 'cache-first',
+        assets: 'cache-first'
+      },
+    },
+    
+    // Monitoring settings
+    monitoring: {
+      enabled: true,
+      logLevel: 'warning', // 'debug', 'info', 'warning', 'error'
+      errorReporting: true,
+      performanceMetrics: true,
+      saveMetricsInterval: 60000, // 1 minute
+      maxLogEntries: 100,
+    },
+    
+    // Storage settings
+    storage: {
+      priorityPages: [], // URLs to prioritize
+      excludePages: [], // URLs to never cache
+      excludePatterns: [/\.(jpg|jpeg|png|gif|svg|mp4|webm|ogg|mp3)$/], // Patterns to exclude
+      cleanupThreshold: 0.9, // Clean cache when storage > 90%
+    },
+    
+    // Hooks
+    hooks: {
+      beforePrefetch: null,      // (url) => boolean
+      afterPrefetch: null,       // (url, success) => void
+      beforeNavigate: null,      // (url) => boolean
+      afterNavigate: null,       // (url) => void
+      onCacheHit: null,          // (url, source) => void
+      onCacheMiss: null,         // (url) => void
+      onError: null,             // (error, context) => void
+      onProgressUpdate: null,    // (progress, url) => void
+    }
+  };
+
+  /**
+   * Utilities
+   */
+  const Utils = {
+    /**
+     * Check if a URL is internal
+     */
+    isInternalUrl: function(url) {
+      if (!url) return false;
+      
+      try {
+        const currentHost = window.location.hostname;
+        const urlObj = new URL(url, window.location.origin);
+        
+        return urlObj.hostname === currentHost && 
+               !url.startsWith('#') && 
+               !url.startsWith('javascript:') &&
+               urlObj.pathname !== window.location.pathname &&
+               !urlObj.pathname.match(/\.(jpg|jpeg|png|gif|svg|mp4|webm|ogg|mp3)$/);
+      } catch (error) {
+        return false;
+      }
+    },
+    
+    /**
+     * Generate a hash for content
+     */
+    generateHash: async function(content) {
+      if (!content) return '';
+      
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(content);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      } catch (error) {
+        Monitor.error('Failed to generate content hash', error);
+        return String(Math.random() + Date.now());
+      }
+    },
+    
+    /**
+     * Compress data
+     */
+    compressData: async function(data) {
+      if (!ULTRA_SPA_CONFIG.compression.enabled || 
+          data.length < ULTRA_SPA_CONFIG.compression.threshold) {
+        return { 
+          compressed: false, 
+          data 
+        };
+      }
+      
+      try {
+        // Use CompressionStream if available
+        if ('CompressionStream' in window) {
+          const encoder = new TextEncoder();
+          const byteArray = encoder.encode(data);
+          
+          const cs = new CompressionStream('gzip');
+          const writer = cs.writable.getWriter();
+          writer.write(byteArray);
+          writer.close();
+          
+          const output = [];
+          const reader = cs.readable.getReader();
+          
+          let result;
+          while (!(result = await reader.read()).done) {
+            output.push(result.value);
+          }
+          
+          const concatenated = new Uint8Array(output.reduce((acc, val) => acc + val.length, 0));
+          let offset = 0;
+          
+          for (const array of output) {
+            concatenated.set(array, offset);
+            offset += array.length;
+          }
+          
+          return {
+            compressed: true,
+            data: concatenated
+          };
+        } else {
+          // Fallback - no compression
+          return {
+            compressed: false,
+            data
+          };
+        }
+      } catch (error) {
+        Monitor.error('Compression failed', error);
+        return {
+          compressed: false,
+          data
+        };
+      }
+    },
+    
+    /**
+     * Decompress data
+     */
+    decompressData: async function(compressedData, wasCompressed) {
+      if (!wasCompressed) return compressedData;
+      
+      try {
+        if ('DecompressionStream' in window) {
+          const ds = new DecompressionStream('gzip');
+          const writer = ds.writable.getWriter();
+          writer.write(compressedData);
+          writer.close();
+          
+          const output = [];
+          const reader = ds.readable.getReader();
+          
+          let result;
+          while (!(result = await reader.read()).done) {
+            output.push(result.value);
+          }
+          
+          const concatenated = new Uint8Array(output.reduce((acc, val) => acc + val.length, 0));
+          let offset = 0;
+          
+          for (const array of output) {
+            concatenated.set(array, offset);
+            offset += array.length;
+          }
+          
+          const decoder = new TextDecoder();
+          return decoder.decode(concatenated);
+        } else {
+          // If decompression is not available but data was compressed, we have a problem
+          throw new Error('Cannot decompress data: DecompressionStream not available');
+        }
+      } catch (error) {
+        Monitor.error('Decompression failed', error);
+        return compressedData;
+      }
+    },
+    
+    /**
+     * Throttle function
+     */
+    throttle: function(func, limit) {
+      let inThrottle;
+      return function() {
+        const args = arguments;
+        const context = this;
+        if (!inThrottle) {
+          func.apply(context, args);
+          inThrottle = true;
+          setTimeout(() => inThrottle = false, limit);
+        }
+      };
+    },
+    
+    /**
+     * Debounce function
+     */
+    debounce: function(func, wait, immediate) {
+      let timeout;
+      return function() {
+        const context = this, args = arguments;
+        const later = function() {
+          timeout = null;
+          if (!immediate) func.apply(context, args);
+        };
+        const callNow = immediate && !timeout;
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+        if (callNow) func.apply(context, args);
+      };
+    }
+  };
+
+  /**
+   * Monitoring system
+   */
+  const Monitor = {
+    logEntries: [],
+    metrics: new Map(),
+    startTime: Date.now(),
+    
+    /**
+     * Log a message
+     */
+    log: function(level, message, data = null) {
+      if (!ULTRA_SPA_CONFIG.monitoring.enabled || 
+          this.getLevelValue(level) < this.getLevelValue(ULTRA_SPA_CONFIG.monitoring.logLevel)) {
+        return;
+      }
+      
+      const timestamp = new Date().toISOString();
+      const entry = {
+        timestamp,
+        level,
+        message,
+        data
+      };
+      
+      // Add to log entries
+      this.logEntries.push(entry);
+      
+      // Trim log if needed
+      if (this.logEntries.length > ULTRA_SPA_CONFIG.monitoring.maxLogEntries) {
+        this.logEntries.shift();
+      }
+      
+      // Console output
+      const logMessage = `[UltraSPA] [${timestamp}] [${level.toUpperCase()}] ${message}`;
+      
+      switch (level) {
+        case 'debug':
+          console.debug(logMessage, data);
+          break;
+        case 'info':
+          console.info(logMessage, data);
+          break;
+        case 'warning':
+          console.warn(logMessage, data);
+          break;
+        case 'error':
+          console.error(logMessage, data);
+          
+          // Call error hook if available
+          if (typeof ULTRA_SPA_CONFIG.hooks.onError === 'function') {
+            try {
+              ULTRA_SPA_CONFIG.hooks.onError(data, { message, timestamp });
+            } catch (e) {
+              console.error('Error in onError hook', e);
+            }
+          }
+          break;
+      }
+    },
+    
+    debug: function(message, data) {
+      this.log('debug', message, data);
+    },
+    
+    info: function(message, data) {
+      this.log('info', message, data);
+    },
+    
+    warning: function(message, data) {
+      this.log('warning', message, data);
+    },
+    
+    error: function(message, error) {
+      this.log('error', message, error);
+    },
+    
+    /**
+     * Get numeric value for log level
+     */
+    getLevelValue: function(level) {
+      const levels = {
+        'debug': 0,
+        'info': 1,
+        'warning': 2,
+        'error': 3
+      };
+      return levels[level] || 0;
+    },
+    
+    /**
+     * Track performance metric
+     */
+    trackPerformance: function(action, duration, metadata = {}) {
+      if (!ULTRA_SPA_CONFIG.monitoring.performanceMetrics) return;
+      
+      if (!this.metrics.has(action)) {
+        this.metrics.set(action, {
+          count: 0,
+          totalDuration: 0,
+          average: 0,
+          min: Infinity,
+          max: 0,
+          recent: []
+        });
+      }
+      
+      const metric = this.metrics.get(action);
+      metric.count++;
+      metric.totalDuration += duration;
+      metric.average = metric.totalDuration / metric.count;
+      metric.min = Math.min(metric.min, duration);
+      metric.max = Math.max(metric.max, duration);
+      
+      // Keep last 10 measurements
+      metric.recent.unshift({ duration, timestamp: Date.now(), ...metadata });
+      if (metric.recent.length > 10) {
+        metric.recent.pop();
+      }
+    },
+    
+    /**
+     * Get all metrics
+     */
+    getMetrics: function() {
+      return Object.fromEntries(this.metrics);
+    },
+    
+    /**
+     * Get performance report
+     */
+    getPerformanceReport: function() {
+      return {
+        uptime: Date.now() - this.startTime,
+        metrics: this.getMetrics(),
+        logEntries: this.logEntries.slice(-20) // Last 20 log entries
+      };
+    }
+  };
+
+  /**
+   * Database Manager for IndexedDB
+   */
+  const DBManager = {
+    db: null,
+    isInitialized: false,
+    
+    /**
+     * Initialize the database
+     */
+    async init() {
+      if (!ULTRA_SPA_CONFIG.db.enabled || this.isInitialized) return;
+      
+      try {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(ULTRA_SPA_CONFIG.db.name, ULTRA_SPA_CONFIG.db.version);
+          
+          request.onerror = (event) => {
+            Monitor.error('IndexedDB open error', event);
+            this.isInitialized = false;
+            reject(event);
+          };
+          
+          request.onsuccess = (event) => {
+            this.db = event.target.result;
+            this.isInitialized = true;
+            Monitor.info('IndexedDB initialized successfully');
+            resolve();
+          };
+          
+          request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            
+            // Create object store for pages
+            if (!db.objectStoreNames.contains(ULTRA_SPA_CONFIG.db.storeName)) {
+              const store = db.createObjectStore(ULTRA_SPA_CONFIG.db.storeName, { keyPath: 'url' });
+              store.createIndex('timestamp', 'timestamp', { unique: false });
+              store.createIndex('hash', 'hash', { unique: false });
+              Monitor.info('Created object store', ULTRA_SPA_CONFIG.db.storeName);
+            }
+          };
+        });
+      } catch (error) {
+        Monitor.error('Failed to initialize IndexedDB', error);
+        this.isInitialized = false;
+        throw error;
+      }
+    },
+    
+    /**
+     * Store a page in the database
+     */
+    async storePage(pageData) {
+      if (!this.isInitialized || !this.db) {
+        await this.init();
+      }
+      
+      if (!this.isInitialized) {
+        throw new Error('IndexedDB not initialized');
+      }
+      
+      return new Promise(async (resolve, reject) => {
+        try {
+          // Generate hash for the content
+          const hash = await Utils.generateHash(pageData.content);
+          
+          // Compress the content if enabled
+          const compressResult = await Utils.compressData(pageData.content);
+          
+          const transaction = this.db.transaction([ULTRA_SPA_CONFIG.db.storeName], 'readwrite');
+          const store = transaction.objectStore(ULTRA_SPA_CONFIG.db.storeName);
+          
+          // Prepare data for storage
+          const storeData = {
+            url: pageData.url,
+            title: pageData.title,
+            description: pageData.description,
+            content: compressResult.data,
+            compressed: compressResult.compressed,
+            timestamp: Date.now(),
+            hash: hash,
+            scripts: pageData.scripts || [],
+            metadata: pageData.metadata || {}
+          };
+          
+          const request = store.put(storeData);
+          
+          request.onsuccess = () => {
+            Monitor.debug('Page stored in IndexedDB', { url: pageData.url, hash });
+            resolve(hash);
+          };
+          
+          request.onerror = (event) => {
+            Monitor.error('Error storing page in IndexedDB', event);
+            reject(event);
+          };
+        } catch (error) {
+          Monitor.error('Failed to store page', error);
+          reject(error);
+        }
+      });
+    },
+    
+    /**
+     * Get a page from the database
+     */
+    async getPage(url) {
+      if (!this.isInitialized || !this.db) {
+        await this.init();
+      }
+      
+      if (!this.isInitialized) {
+        return null;
+      }
+      
+      return new Promise((resolve, reject) => {
+        try {
+          const transaction = this.db.transaction([ULTRA_SPA_CONFIG.db.storeName], 'readonly');
+          const store = transaction.objectStore(ULTRA_SPA_CONFIG.db.storeName);
+          const request = store.get(url);
+          
+          request.onsuccess = async (event) => {
+            const result = event.target.result;
+            
+            if (!result) {
+              resolve(null);
+              return;
+            }
+            
+            // Check if cache is expired
+            if (ULTRA_SPA_CONFIG.cache.persistentTTL > 0) {
+              const age = Date.now() - result.timestamp;
+              if (age > ULTRA_SPA_CONFIG.cache.persistentTTL) {
+                Monitor.debug('Cache expired', { url, age });
+                resolve(null);
+                return;
+              }
+            }
+            
+            try {
+              // Decompress content if needed
+              const content = await Utils.decompressData(result.content, result.compressed);
+              
+              // Return the page data
+              resolve({
+                url: result.url,
+                title: result.title,
+                description: result.description,
+                content: content,
+                timestamp: result.timestamp,
+                hash: result.hash,
+                scripts: result.scripts || [],
+                metadata: result.metadata || {}
+              });
+            } catch (error) {
+              Monitor.error('Error decompressing page content', error);
+              resolve(null);
+            }
+          };
+          
+          request.onerror = (event) => {
+            Monitor.error('Error retrieving page from IndexedDB', event);
+            reject(event);
+          };
+        } catch (error) {
+          Monitor.error('Failed to get page from IndexedDB', error);
+          reject(error);
+        }
+      });
+    },
+    
+    /**
+     * Delete a page from the database
+     */
+    async deletePage(url) {
+      if (!this.isInitialized || !this.db) {
+        await this.init();
+      }
+      
+      if (!this.isInitialized) {
+        return false;
+      }
+      
+      return new Promise((resolve, reject) => {
+        try {
+          const transaction = this.db.transaction([ULTRA_SPA_CONFIG.db.storeName], 'readwrite');
+          const store = transaction.objectStore(ULTRA_SPA_CONFIG.db.storeName);
+          const request = store.delete(url);
+          
+          request.onsuccess = () => {
+            Monitor.debug('Page deleted from IndexedDB', { url });
+            resolve(true);
+          };
+          
+          request.onerror = (event) => {
+            Monitor.error('Error deleting page from IndexedDB', event);
+            reject(event);
+          };
+        } catch (error) {
+          Monitor.error('Failed to delete page from IndexedDB', error);
+          reject(error);
+        }
+      });
+    },
+    
+    /**
+     * Clean up old entries
+     */
+    async cleanup() {
+      if (!this.isInitialized || !this.db) {
+        await this.init();
+      }
+      
+      if (!this.isInitialized) {
+        return;
+      }
+      
+      return new Promise((resolve, reject) => {
+        try {
+          const transaction = this.db.transaction([ULTRA_SPA_CONFIG.db.storeName], 'readwrite');
+          const store = transaction.objectStore(ULTRA_SPA_CONFIG.db.storeName);
+          const index = store.index('timestamp');
+          
+          // Get all entries
+          const request = index.openCursor();
+          const expiry = Date.now() - ULTRA_SPA_CONFIG.cache.persistentTTL;
+          let deletedCount = 0;
+          
+          request.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) {
+              if (cursor.value.timestamp < expiry) {
+                // Delete expired entries
+                cursor.delete();
+                deletedCount++;
+              }
+              cursor.continue();
+            } else {
+              Monitor.info('Cache cleanup completed', { deletedEntries: deletedCount });
+              resolve(deletedCount);
+            }
+          };
+          
+          request.onerror = (event) => {
+            Monitor.error('Error during cache cleanup', event);
+            reject(event);
+          };
+        } catch (error) {
+          Monitor.error('Failed to clean up cache', error);
+          reject(error);
+        }
+      });
+    },
+    
+    /**
+     * Get database stats
+     */
+    async getStats() {
+      if (!this.isInitialized || !this.db) {
+        await this.init();
+      }
+      
+      if (!this.isInitialized) {
+        return { entryCount: 0, oldestEntry: null, newestEntry: null };
+      }
+      
+      return new Promise((resolve, reject) => {
+        try {
+          const transaction = this.db.transaction([ULTRA_SPA_CONFIG.db.storeName], 'readonly');
+          const store = transaction.objectStore(ULTRA_SPA_CONFIG.db.storeName);
+          const countRequest = store.count();
+          
+          countRequest.onsuccess = () => {
+            const entryCount = countRequest.result;
+            
+            // Get oldest entry
+            const index = store.index('timestamp');
+            const oldestRequest = index.openCursor();
+            
+            oldestRequest.onsuccess = (event) => {
+              const oldestCursor = event.target.result;
+              const oldestEntry = oldestCursor ? {
+                url: oldestCursor.value.url,
+                timestamp: oldestCursor.value.timestamp
+              } : null;
+              
+              // Get newest entry
+              const newestRequest = index.openCursor(null, 'prev');
+              
+              newestRequest.onsuccess = (event) => {
+                const newestCursor = event.target.result;
+                const newestEntry = newestCursor ? {
+                  url: newestCursor.value.url,
+                  timestamp: newestCursor.value.timestamp
+                } : null;
+                
+                resolve({
+                  entryCount,
+                  oldestEntry,
+                  newestEntry
+                });
+              };
+              
+              newestRequest.onerror = (event) => {
+                reject(event);
+              };
+            };
+            
+            oldestRequest.onerror = (event) => {
+              reject(event);
+            };
+          };
+          
+          countRequest.onerror = (event) => {
+            reject(event);
+          };
+        } catch (error) {
+          Monitor.error('Failed to get database stats', error);
+          reject(error);
+        }
+      });
+    }
+  };
+
+  /**
+   * Memory Cache Manager
+   */
+  const MemoryCache = {
+    cache: new Map(),
+    
+    /**
+     * Set a page in the cache
+     */
+    set: function(url, pageData) {
+      // Check if we need to clean up
+      if (this.cache.size >= ULTRA_SPA_CONFIG.cache.memoryLimit) {
+        // Remove oldest entry
+        let oldestKey = null;
+        let oldestTime = Infinity;
+        
+        for (const [key, data] of this.cache.entries()) {
+          if (data.timestamp < oldestTime) {
+            oldestTime = data.timestamp;
+            oldestKey = key;
+          }
+        }
+        
+        if (oldestKey) {
+          this.cache.delete(oldestKey);
+        }
+      }
+      
+      // Add to cache with timestamp
+      this.cache.set(url, {
+        ...pageData,
+        timestamp: Date.now()
+      });
+      
+      Monitor.debug('Page added to memory cache', { url });
+    },
+    
+    /**
+     * Get a page from the cache
+     */
+    get: function(url) {
+      if (!this.cache.has(url)) {
+        return null;
+      }
+      
+      const cachedData = this.cache.get(url);
+      
+      // Check if cache is expired
+      if (ULTRA_SPA_CONFIG.cache.inMemoryTTL > 0) {
+        const age = Date.now() - cachedData.timestamp;
+        if (age > ULTRA_SPA_CONFIG.cache.inMemoryTTL) {
+          this.cache.delete(url);
+          return null;
+        }
+      }
+      
+      return cachedData;
+    },
+    
+    /**
+     * Clear the cache
+     */
+    clear: function() {
+      this.cache.clear();
+      Monitor.debug('Memory cache cleared');
+    }
+  };
+
+  /**
+   * Content Versioning
+   */
+  const Versioning = {
+    versions: new Map(),
+    
+    /**
+     * Set version for a URL
+     */
+    setVersion: async function(url, content) {
+      const hash = await Utils.generateHash(content);
+      this.versions.set(url, {
+        hash,
+        timestamp: Date.now()
+      });
+      return hash;
+    },
+    
+    /**
+     * Check if content has a new version
+     */
+    async hasNewVersion: async function(url, content) {
+      if (!this.versions.has(url)) return true;
+      
+      const currentHash = await Utils.generateHash(content);
+      const storedVersion = this.versions.get(url);
+      
+      return currentHash !== storedVersion.hash;
+    },
+    
+    /**
+     * Get version info for a URL
+     */
+    getVersionInfo: function(url) {
+      return this.versions.get(url) || null;
+    }
+  };
+
+  /**
+   * Network Manager
+   */
+  const NetworkManager = {
+    activeRequests: new Map(),
+    requestQueue: [],
+    
+    /**
+     * Check if we should prefetch based on network conditions
+     */
+    shouldPrefetch: function() {
+      // Check for Data Saver
+      if (ULTRA_SPA_CONFIG.network.respectDataSaver && 
+          navigator.connection && 
+          navigator.connection.saveData) {
+        Monitor.debug('Prefetch disabled: Data Saver mode enabled');
+        return false;
+      }
+      
+      // Check connection type
+      if (ULTRA_SPA_CONFIG.network.disablePrefetchOnLowBandwidth &&
+          navigator.connection) {
+        const connection = navigator.connection;
+        const effectiveType = connection.effectiveType;
+        
+        if (effectiveType === 'slow-2g' || effectiveType === '2g') {
+          Monitor.debug('Prefetch disabled: Low bandwidth connection', { effectiveType });
+          return false;
+        }
+      }
+      
+      return true;
+    },
+    
+    /**
+     * Fetch a page with retry logic
+     */
+    fetchWithRetry: async function(url, attempt = 1) {
+      // Check if we're already fetching this URL
+      if (this.activeRequests.has(url)) {
+        return this.activeRequests.get(url);
+      }
+      
+      const fetchPromise = new Promise(async (resolve, reject) => {
+        try {
+          const controller = new AbortController();
+          const signal = controller.signal;
+          
+          // Set timeout
+          const timeoutId = setTimeout(() => {
+            controller.abort();
+          }, ULTRA_SPA_CONFIG.network.timeout);
+          
+          const startTime = performance.now();
+          const response = await fetch(url, {
+            method: 'GET',
+            credentials: 'same-origin',
+            signal,
+            headers: ULTRA_SPA_CONFIG.network.headers
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          
+          const html = await response.text();
+          const fetchTime = performance.now() - startTime;
+          
+          Monitor.trackPerformance('fetch', fetchTime, { url, size: html.length });
+          Monitor.debug('Page fetched successfully', { url, fetchTime: `${fetchTime.toFixed(2)}ms` });
+          
+          resolve(html);
+        } catch (error) {
+          if (error.name === 'AbortError') {
+            Monitor.warning('Fetch timeout', { url, timeout: ULTRA_SPA_CONFIG.network.timeout });
+          } else {
+            Monitor.error('Fetch error', { url, error: error.message, attempt });
+          }
+          
+          // Retry logic
+          if (attempt < ULTRA_SPA_CONFIG.network.retryAttempts) {
+            Monitor.debug(`Retrying fetch (${attempt + 1}/${ULTRA_SPA_CONFIG.network.retryAttempts})`, { url });
+            
+            // Wait before retry
+            await new Promise(r => setTimeout(r, ULTRA_SPA_CONFIG.network.retryDelay));
+            
+            try {
+              const result = await this.fetchWithRetry(url, attempt + 1);
+              resolve(result);
+            } catch (retryError) {
+              reject(retryError);
+            }
+          } else {
+            reject(error);
+          }
+                  } finally {
+            // Remove from active requests
+            this.activeRequests.delete(url);
+            
+            // Process next in queue if available
+            if (this.requestQueue.length > 0) {
+              const nextRequest = this.requestQueue.shift();
+              this.fetchWithRetry(nextRequest.url)
+                .then(nextRequest.resolve)
+                .catch(nextRequest.reject);
+            }
+          }
+        });
+      
+      // Store the active request
+      this.activeRequests.set(url, fetchPromise);
+      
+      return fetchPromise;
+    },
+    
+    /**
+     * Queue a fetch if we've hit the concurrent limit
+     */
+    queueOrFetch: function(url) {
+      if (this.activeRequests.size >= ULTRA_SPA_CONFIG.network.concurrentFetch) {
+        // Queue the request
+        return new Promise((resolve, reject) => {
+          this.requestQueue.push({ url, resolve, reject });
+          Monitor.debug('Fetch queued', { url, queueLength: this.requestQueue.length });
+        });
+      } else {
+        // Execute immediately
+        return this.fetchWithRetry(url);
+      }
+    },
+    
+    /**
+     * Cancel all active requests
+     */
+    cancelAll: function() {
+      this.activeRequests.clear();
+      this.requestQueue = [];
+    },
+    
+    /**
+     * Get network stats
+     */
+    getStats: function() {
+      return {
+        activeRequests: this.activeRequests.size,
+        queuedRequests: this.requestQueue.length,
+        connection: navigator.connection ? {
+          effectiveType: navigator.connection.effectiveType,
+          saveData: navigator.connection.saveData,
+          downlink: navigator.connection.downlink
+        } : null
+      };
+    }
+  };
+
+  /**
+   * Content Parser
+   */
+  const ContentParser = {
+    /**
+     * Parse HTML content
+     */
+    parseHTML: function(html, url) {
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        
+        // Extract title
+        const title = doc.querySelector('title')?.textContent || '';
+        
+        // Extract description
+        const description = doc.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+        
+        // Find content element
+        let contentElement = null;
+        for (const selector of ULTRA_SPA_CONFIG.selectors.content) {
+          contentElement = doc.querySelector(selector);
+          if (contentElement) break;
+        }
+        
+        if (!contentElement) {
+          throw new Error('Content element not found in fetched page');
+        }
+        
+        // Extract scripts if enabled
+        let scripts = [];
+        if (ULTRA_SPA_CONFIG.selectors.updateScripts) {
+          scripts = Array.from(doc.querySelectorAll('script:not([src])'))
+            .map(script => script.textContent)
+            .filter(Boolean);
+        }
+        
+        // Extract head elements to update
+        const headElements = {};
+        if (ULTRA_SPA_CONFIG.navigation.updateHead) {
+          for (const selector of ULTRA_SPA_CONFIG.selectors.head) {
+            const elements = Array.from(doc.querySelectorAll(selector));
+            if (elements.length > 0) {
+              headElements[selector] = elements.map(el => el.outerHTML);
+            }
+          }
+        }
+        
+        return {
+          url,
+          title,
+          description,
+          content: contentElement.innerHTML,
+          scripts,
+          headElements,
+          metadata: {
+            parsedAt: Date.now()
+          }
+        };
+      } catch (error) {
+        Monitor.error('Error parsing HTML', { url, error });
+        throw error;
+      }
+    }
+  };
+
+  /**
+   * Cache Manager (combines memory and persistent cache)
+   */
+  const CacheManager = {
+    /**
+     * Initialize cache
+     */
+    async init() {
+      if (ULTRA_SPA_CONFIG.db.enabled) {
+        await DBManager.init();
+        
+        // Set up periodic cleanup
+        if (ULTRA_SPA_CONFIG.cache.cleanupInterval > 0) {
+          setInterval(() => {
+            this.cleanup();
+          }, ULTRA_SPA_CONFIG.cache.cleanupInterval);
+        }
+      }
+    },
+    
+    /**
+     * Store page in cache
+     */
+    async storePage(pageData) {
+      const startTime = performance.now();
+      
+      try {
+        // Store in memory if enabled
+        if (ULTRA_SPA_CONFIG.cache.enabled && ULTRA_SPA_CONFIG.cache.strategy !== 'indexeddb') {
+          MemoryCache.set(pageData.url, pageData);
+        }
+        
+        // Store in IndexedDB if enabled
+        if (ULTRA_SPA_CONFIG.cache.enabled && 
+            ULTRA_SPA_CONFIG.db.enabled && 
+            ULTRA_SPA_CONFIG.cache.strategy !== 'memory') {
+          await DBManager.storePage(pageData);
+        }
+        
+        // Update version info
+        await Versioning.setVersion(pageData.url, pageData.content);
+        
+        const duration = performance.now() - startTime;
+        Monitor.trackPerformance('cacheStore', duration, { url: pageData.url });
+        
+        return true;
+      } catch (error) {
+        Monitor.error('Failed to store page in cache', { url: pageData.url, error });
+        return false;
+      }
+    },
+    
+    /**
+     * Get page from cache
+     */
+    async getPage(url) {
+      const startTime = performance.now();
+      
+      try {
+        // Try memory cache first
+        if (ULTRA_SPA_CONFIG.cache.enabled && ULTRA_SPA_CONFIG.cache.strategy !== 'indexeddb') {
+          const memoryData = MemoryCache.get(url);
+          if (memoryData) {
+            Monitor.debug('Memory cache hit', { url });
+            
+            if (typeof ULTRA_SPA_CONFIG.hooks.onCacheHit === 'function') {
+              ULTRA_SPA_CONFIG.hooks.onCacheHit(url, 'memory');
+            }
+            
+            const duration = performance.now() - startTime;
+            Monitor.trackPerformance('cacheHitMemory', duration, { url });
+            
+            return memoryData;
+          }
+        }
+        
+        // Try IndexedDB if enabled
+        if (ULTRA_SPA_CONFIG.cache.enabled && 
+            ULTRA_SPA_CONFIG.db.enabled && 
+            ULTRA_SPA_CONFIG.cache.strategy !== 'memory') {
+          const dbData = await DBManager.getPage(url);
+          if (dbData) {
+            Monitor.debug('IndexedDB cache hit', { url });
+            
+            // Also cache in memory for faster access next time
+            if (ULTRA_SPA_CONFIG.cache.strategy === 'both') {
+              MemoryCache.set(url, dbData);
+            }
+            
+            if (typeof ULTRA_SPA_CONFIG.hooks.onCacheHit === 'function') {
+              ULTRA_SPA_CONFIG.hooks.onCacheHit(url, 'indexeddb');
+            }
+            
+            const duration = performance.now() - startTime;
+            Monitor.trackPerformance('cacheHitIndexedDB', duration, { url });
+            
+            return dbData;
+          }
+        }
+        
+        // Cache miss
+        if (typeof ULTRA_SPA_CONFIG.hooks.onCacheMiss === 'function') {
+          ULTRA_SPA_CONFIG.hooks.onCacheMiss(url);
+        }
+        
+        Monitor.debug('Cache miss', { url });
+        return null;
+      } catch (error) {
+        Monitor.error('Error retrieving page from cache', { url, error });
+        return null;
+      }
+    },
+    
+    /**
+     * Check if URL should be cached
+     */
+    shouldCache(url) {
+      // Check if URL is in exclude list
+      if (ULTRA_SPA_CONFIG.storage.excludePages.includes(url)) {
+        return false;
+      }
+      
+      // Check if URL matches exclude patterns
+      for (const pattern of ULTRA_SPA_CONFIG.storage.excludePatterns) {
+        if (pattern.test(url)) {
+          return false;
+        }
+      }
+      
+      return true;
+    },
+    
+    /**
+     * Clean up cache
+     */
+    async cleanup() {
+      try {
+        // Clear memory cache
+        if (ULTRA_SPA_CONFIG.cache.strategy !== 'indexeddb') {
+          MemoryCache.clear();
+        }
+        
+        // Clean IndexedDB
+        if (ULTRA_SPA_CONFIG.db.enabled && ULTRA_SPA_CONFIG.cache.strategy !== 'memory') {
+          const deletedCount = await DBManager.cleanup();
+          Monitor.info('Cache cleanup completed', { deletedEntries: deletedCount });
+        }
+      } catch (error) {
+        Monitor.error('Error during cache cleanup', error);
+      }
+    }
+  };
+
+  /**
+   * Prefetch Manager
+   */
+  const PrefetchManager = {
+    prefetchedURLs: new Set(),
+    
+    /**
+     * Prefetch a URL
+     */
+    async prefetch(url, priority = false) {
+      // Skip if already prefetched
+      if (this.prefetchedURLs.has(url)) {
+        return;
+      }
+      
+      // Check if we should prefetch
+      if (!NetworkManager.shouldPrefetch()) {
+        return;
+      }
+      
+      // Check if URL should be cached
+      if (!CacheManager.shouldCache(url)) {
+        return;
+      }
+      
+      // Call beforePrefetch hook if defined
+      if (typeof ULTRA_SPA_CONFIG.hooks.beforePrefetch === 'function') {
+        const shouldContinue = ULTRA_SPA_CONFIG.hooks.beforePrefetch(url);
+        if (shouldContinue === false) {
+          Monitor.debug('Prefetch cancelled by beforePrefetch hook', { url });
+          return;
+        }
+      }
+      
+      // Add resource hint
+      this.addResourceHint(url, priority ? 'preload' : 'prefetch');
+      
+      // Mark as prefetched
+      this.prefetchedURLs.add(url);
+      
+      try {
+        // Check cache first
+        const cachedPage = await CacheManager.getPage(url);
+        if (cachedPage) {
+          // No need to fetch again if we have it cached
+          return;
+        }
+        
+        // Fetch the page
+        const html = await NetworkManager.queueOrFetch(url);
+        
+        // Parse the content
+        const pageData = ContentParser.parseHTML(html, url);
+        
+        // Store in cache
+        await CacheManager.storePage(pageData);
+        
+        // Call afterPrefetch hook if defined
+        if (typeof ULTRA_SPA_CONFIG.hooks.afterPrefetch === 'function') {
+          ULTRA_SPA_CONFIG.hooks.afterPrefetch(url, true);
+        }
+        
+        return pageData;
+      } catch (error) {
+        Monitor.error('Prefetch failed', { url, error });
+        
+        // Call afterPrefetch hook with failure
+        if (typeof ULTRA_SPA_CONFIG.hooks.afterPrefetch === 'function') {
+          ULTRA_SPA_CONFIG.hooks.afterPrefetch(url, false);
+        }
+        
+        return null;
+      }
+    },
+    
+    /**
+     * Add resource hint
+     */
+    addResourceHint(url, type = 'prefetch') {
+      if (document.querySelector(`link[href="${url}"][rel="${type}"]`)) {
+        return;
+      }
+      
+      const link = document.createElement('link');
+      link.rel = type;
+      link.href = url;
+      link.as = 'document';
+      
+      document.head.appendChild(link);
+      Monitor.debug(`Added ${type} hint for: ${url}`);
+    },
+    
+    /**
+     * Prefetch multiple links
+     */
+    prefetchLinks(options = {}) {
+      const {
+        prefetchAll = false,
+        maxLinks = ULTRA_SPA_CONFIG.prefetch.maxLinks,
+        priority = false
+      } = options;
+      
+      // Skip if prefetch disabled
+      if (!NetworkManager.shouldPrefetch()) {
+        return;
+      }
+      
+      // Determine selector based on priority
+      let selector;
+      if (priority) {
+        selector = ULTRA_SPA_CONFIG.prefetch.priorityClasses.map(cls => `a.${cls}`).join(',');
+      } else if (prefetchAll) {
+        selector = 'a';
+      } else {
+        selector = ULTRA_SPA_CONFIG.prefetch.classes.map(cls => `a.${cls}`).join(',');
+      }
+      
+      // Get all matching links
+      const links = Array.from(document.querySelectorAll(selector));
+      let prefetchCount = 0;
+      
+      links.forEach((link, index) => {
+        if (prefetchCount >= maxLinks) return;
+        
+        const url = link.href;
+        if (!url || !Utils.isInternalUrl(url)) return;
+        
+        // Skip ignored links
+        for (const ignoreSelector of ULTRA_SPA_CONFIG.selectors.ignore) {
+          if (link.matches(ignoreSelector)) {
+            return;
+          }
+        }
+        
+        // Delay prefetch to avoid bottleneck
+        setTimeout(() => {
+          this.prefetch(url, priority);
+        }, prefetchCount * ULTRA_SPA_CONFIG.prefetch.prefetchDelay);
+        
+        prefetchCount++;
+      });
+      
+      Monitor.debug(`Scheduled prefetch for ${prefetchCount} links`);
+    },
+    
+    /**
+     * Initialize lazy prefetch with Intersection Observer
+     */
+    initLazyPrefetch() {
+      if (!('IntersectionObserver' in window)) {
+        Monitor.warning('IntersectionObserver not supported, lazy prefetch disabled');
+        return;
+      }
+      
+      const observer = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const link = entry.target;
+            
+            if (link.href && Utils.isInternalUrl(link.href)) {
+              this.prefetch(link.href);
+            }
+            
+            observer.unobserve(link);
+          }
+        });
+      }, {
+        rootMargin: '200px',
+        threshold: 0.1
+      });
+      
+      // Observe all links
+      document.querySelectorAll('a').forEach(link => {
+        if (Utils.isInternalUrl(link.href)) {
+          observer.observe(link);
+        }
+      });
+    },
+    
+    /**
+     * Initialize hover prefetch
+     */
+    initHoverPrefetch() {
+      if (!ULTRA_SPA_CONFIG.prefetch.prefetchOnHover) {
+        return;
+      }
+      
+      const handleMouseEnter = Utils.debounce((event) => {
+        const link = event.target.closest('a');
+        if (!link || !Utils.isInternalUrl(link.href)) return;
+        
+        // Skip ignored links
+        for (const ignoreSelector of ULTRA_SPA_CONFIG.selectors.ignore) {
+          if (link.matches(ignoreSelector)) {
+            return;
+          }
+        }
+        
+        this.prefetch(link.href);
+      }, ULTRA_SPA_CONFIG.prefetch.hoverDelay);
+      
+      // Use event delegation for better performance
+      document.addEventListener('mouseover', handleMouseEnter);
+    }
+  };
+
+  /**
+   * UI Manager
+   */
+  const UIManager = {
+    progressBar: null,
+    loadingIndicator: null,
+    
+    /**
+     * Initialize UI elements
+     */
+    init() {
+      if (ULTRA_SPA_CONFIG.ui.showProgressBar) {
+        this.createProgressBar();
+      }
+      
+      if (ULTRA_SPA_CONFIG.ui.showLoadingIndicator) {
+        this.createLoadingIndicator();
+      }
+    },
+    
+    /**
+     * Create progress bar
+     */
+    createProgressBar() {
+      const progressBar = document.createElement('div');
+      progressBar.id = 'ultra-spa-progress';
+      progressBar.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 0%;
+        height: ${ULTRA_SPA_CONFIG.ui.progressBarHeight};
+        background-color: ${ULTRA_SPA_CONFIG.ui.progressBarColor};
+        z-index: 9999;
+        transition: width 0.2s ease;
+        transform: translateZ(0);
+        display: none;
+      `;
+      
+      document.body.appendChild(progressBar);
+      this.progressBar = progressBar;
+    },
+    
+    /**
+     * Show progress
+     */
+    showProgress(progress = 0) {
+      if (!this.progressBar) return;
+      
+      this.progressBar.style.display = 'block';
+      this.progressBar.style.width = `${progress}%`;
+      
+      if (typeof ULTRA_SPA_CONFIG.hooks.onProgressUpdate === 'function') {
+        ULTRA_SPA_CONFIG.hooks.onProgressUpdate(progress);
+      }
+    },
+    
+    /**
+     * Update progress
+     */
+    updateProgress(progress) {
+      if (!this.progressBar) return;
+      this.progressBar.style.width = `${progress}%`;
+      
+      if (typeof ULTRA_SPA_CONFIG.hooks.onProgressUpdate === 'function') {
+        ULTRA_SPA_CONFIG.hooks.onProgressUpdate(progress);
+      }
+    },
+    
+    /**
+     * Hide progress
+     */
+    hideProgress() {
+      if (!this.progressBar) return;
+      
+      this.progressBar.style.width = '100%';
+      
+      setTimeout(() => {
+        this.progressBar.style.display = 'none';
+        this.progressBar.style.width = '0%';
+      }, 200);
+    },
+    
+    /**
+     * Create loading indicator
+     */
+    createLoadingIndicator() {
+      const indicator = document.createElement('div');
+      indicator.id = 'ultra-spa-loading';
+      
+      // Position the loader based on configuration
+      let positionStyle = '';
+      switch (ULTRA_SPA_CONFIG.ui.loadingIndicatorPosition) {
+        case 'top':
+          positionStyle = 'top: 10px; left: 50%; transform: translateX(-50%);';
+          break;
+        case 'bottom':
+          positionStyle = 'bottom: 10px; left: 50%; transform: translateX(-50%);';
+          break;
+        default: // center
+          positionStyle = 'top: 50%; left: 50%; transform: translate(-50%, -50%);';
+      }
+      
+      indicator.style.cssText = `
+        position: fixed;
+        ${positionStyle}
+        width: 40px;
+        height: 40px;
+        border: 3px solid rgba(0,0,0,0.1);
+        border-radius: 50%;
+        border-top-color: ${ULTRA_SPA_CONFIG.ui.loadingIndicatorColor};
+        z-index: 9998;
+        animation: ultra-spa-spin 1s infinite linear;
+        display: none;
+      `;
+      
+      const style = document.createElement('style');
+      style.textContent = `
+        @keyframes ultra-spa-spin {
+          to { transform: rotate(360deg); }
+        }
+      `;
+      
+      document.head.appendChild(style);
+      document.body.appendChild(indicator);
+      this.loadingIndicator = indicator;
+    },
+    
+    /**
+     * Show loading indicator
+     */
+    showLoadingIndicator() {
+      if (!this.loadingIndicator) return;
+      this.loadingIndicator.style.display = 'block';
+    },
+    
+    /**
+     * Hide loading indicator
+     */
+    hideLoadingIndicator() {
+      if (!this.loadingIndicator) return;
+      this.loadingIndicator.style.display = 'none';
+    },
+    
+    /**
+     * Announce page changes for accessibility
+     */
+    announcePageChange(pageData) {
+      if (!ULTRA_SPA_CONFIG.ui.announcePageChanges) return;
+      
+      let announcer = document.getElementById('ultra-spa-announcer');
+      
+      if (!announcer) {
+        announcer = document.createElement('div');
+        announcer.id = 'ultra-spa-announcer';
+        announcer.setAttribute('aria-live', 'polite');
+        announcer.setAttribute('aria-atomic', 'true');
+        announcer.className = 'sr-only';
+        announcer.style.cssText = 'position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;';
+        document.body.appendChild(announcer);
+      }
+      
+      announcer.textContent = `Navigated to ${pageData.title}`;
+    }
+  };
+
+  /**
+   * Service Worker Manager
+   */
+  const ServiceWorkerManager = {
+    /**
+     * Register service worker
+     */
+    async register() {
+      if (!ULTRA_SPA_CONFIG.serviceWorker.enabled || !('serviceWorker' in navigator)) {
+        return false;
+      }
+      
+      try {
+        const registration = await navigator.serviceWorker.register(
+          ULTRA_SPA_CONFIG.serviceWorker.path, 
+          { scope: ULTRA_SPA_CONFIG.serviceWorker.scope }
+        );
+        
+        Monitor.info('Service Worker registered', { 
+          scope: registration.scope 
+        });
+        
+        // Set up communication with the service worker
+        this.setupMessaging();
+        
+        return true;
+      } catch (error) {
+        Monitor.error('Service Worker registration failed', error);
+        return false;
+      }
+    },
+    
+    /**
+     * Set up messaging with service worker
+     */
+    setupMessaging() {
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        const message = event.data;
+        
+        switch (message.type) {
+          case 'CACHE_UPDATED':
+            Monitor.debug('Service Worker cache updated', message.data);
+            break;
+            
+          case 'CACHE_ERROR':
+            Monitor.error('Service Worker cache error', message.data);
+            break;
+            
+          case 'VERSION_CHECK':
+            // If service worker reports a new version, we might want to refresh
+            if (message.data.hasNewVersion && ULTRA_SPA_CONFIG.versioning.forceUpdate) {
+              window.location.reload();
+            }
+            break;
+        }
+      });
+    },
+    
+    /**
+     * Send message to service worker
+     */
+    sendMessage(message) {
+      if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) {
+        return;
+      }
+      
+      navigator.serviceWorker.controller.postMessage(message);
+    },
+    
+    /**
+     * Update service worker
+     */
+    async update() {
+      if (!('serviceWorker' in navigator)) {
+        return false;
+      }
+      
+      try {
+        const registration = await navigator.serviceWorker.getRegistration();
+        if (registration) {
+          await registration.update();
+          Monitor.info('Service Worker updated');
+          return true;
+        }
+        return false;
+      } catch (error) {
+        Monitor.error('Service Worker update failed', error);
+        return false;
+      }
+    }
+  };
+
+  /**
+   * Navigation Manager
+   */
+  const NavigationManager = {
+    activeElement: null,
+    scrollPositions: new Map(),
+    
+    /**
+     * Initialize navigation
+     */
+    init() {
+      if (!ULTRA_SPA_CONFIG.navigation.enabled) {
+        return;
+      }
+      
+      // Set up event listeners for links
+      this.setupLinkHandlers();
+      
+      // Handle back/forward navigation
+      window.addEventListener('popstate', this.handlePopState.bind(this));
+      
+      // Store initial state
+      history.replaceState(
+        { url: window.location.href },
+        document.title,
+        window.location.href
+      );
+    },
+    
+    /**
+     * Set up link click handlers
+     */
+    setupLinkHandlers() {
+      document.addEventListener('click', this.handleLinkClick.bind(this));
+    },
+    
+    /**
+     * Handle link clicks
+     */
+    handleLinkClick(event) {
+      // Find closest anchor element
+      const link = event.target.closest('a');
+      
+      if (!link || 
+          !Utils.isInternalUrl(link.href) || 
+          event.ctrlKey || 
+          event.metaKey || 
+          event.shiftKey) {
+        return;
+      }
+      
+      // Skip ignored links
+      for (const ignoreSelector of ULTRA_SPA_CONFIG.selectors.ignore) {
+        if (link.matches(ignoreSelector)) {
+          return;
+        }
+      }
+      
+      event.preventDefault();
+      this.navigateTo(link.href);
+    },
+    
+    /**
+     * Navigate to URL
+     */
+    async navigateTo(url) {
+      // Call beforeNavigate hook if defined
+      if (typeof ULTRA_SPA_CONFIG.hooks.beforeNavigate === 'function') {
+        const shouldContinue = ULTRA_SPA_CONFIG.hooks.beforeNavigate(url);
+        if (shouldContinue === false) {
+          Monitor.debug('Navigation cancelled by beforeNavigate hook', { url });
+          return;
+        }
+      }
+      
+      // Store the active element for focus restoration
+      this.activeElement = document.activeElement;
+      
+      // Save current scroll position
+      if (ULTRA_SPA_CONFIG.navigation.scrollRestoration) {
+        this.scrollPositions.set(
+          window.location.href,
+          { x: window.scrollX, y: window.scrollY }
+        );
+      }
+      
+      // Show loading indicators
+      UIManager.showProgress(10);
+      UIManager.showLoadingIndicator();
+      
+      try {
+        // Try to get page from cache first
+        let pageData = await CacheManager.getPage(url);
+        let fromCache = !!pageData;
+        
+        if (!pageData) {
+          // Not in cache, fetch it
+          UIManager.updateProgress(30);
+          const html = await NetworkManager.fetchWithRetry(url);
+          UIManager.updateProgress(60);
+          
+          // Parse the HTML
+          pageData = ContentParser.parseHTML(html, url);
+          
+          // Store in cache for future use
+          if (CacheManager.shouldCache(url)) {
+            await CacheManager.storePage(pageData);
+          }
+        }
+        
+        UIManager.updateProgress(80);
+        
+        // Render the page
+        await this.renderPage(pageData);
+        
+        UIManager.updateProgress(100);
+        UIManager.hideLoadingIndicator();
+        UIManager.hideProgress();
+        
+        // Call afterNavigate hook if defined
+        if (typeof ULTRA_SPA_CONFIG.hooks.afterNavigate === 'function') {
+          ULTRA_SPA_CONFIG.hooks.afterNavigate(url);
+        }
+        
+        // Re-initialize prefetching for new links
+        this.setupNewPageLinks();
+        
+        // Fire navigation event
+        window.dispatchEvent(new CustomEvent('ultraSpaNavigation', {
+          detail: { 
+            url,
+            fromCache,
+            title: pageData.title
+          }
+        }));
+      } catch (error) {
+        Monitor.error('Navigation failed', { url, error });
+        UIManager.hideProgress();
+        UIManager.hideLoadingIndicator();
+        
+        // Fallback to traditional navigation
+        window.location.href = url;
+      }
+    },
+    
+    /**
+     * Render page content
+     */
+    async renderPage(pageData) {
+      // Update document title
+      document.title = pageData.title;
+      
+      // Update URL if enabled
+      if (ULTRA_SPA_CONFIG.navigation.replaceUrls) {
+        history.pushState(
+          { url: pageData.url },
+          pageData.title,
+          pageData.url
+        );
+      }
+      
+      // Update head elements if enabled
+      if (ULTRA_SPA_CONFIG.navigation.updateHead && pageData.headElements) {
+        this.updateHeadElements(pageData.headElements);
+      }
+      
+      // Find content element
+      let contentElement = null;
+      for (const selector of ULTRA_SPA_CONFIG.selectors.content) {
+        contentElement = document.querySelector(selector);
+        if (contentElement) break;
+      }
+      
+      if (!contentElement) {
+        throw new Error('Content element not found in current page');
+      }
+      
+      // Apply transition if enabled
+      if (ULTRA_SPA_CONFIG.ui.enableTransitions) {
+        contentElement.classList.add(ULTRA_SPA_CONFIG.ui.transitionClass);
+        
+        // Wait for transition to start
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
+        // Update content
+        contentElement.innerHTML = pageData.content;
+        
+        // Wait for transition duration
+        await new Promise(resolve => setTimeout(resolve, ULTRA_SPA_CONFIG.ui.transitionDuration));
+        
+        // Remove transition class
+        contentElement.classList.remove(ULTRA_SPA_CONFIG.ui.transitionClass);
+      } else {
+        // Update content immediately without transition
+        contentElement.innerHTML = pageData.content;
+      }
+      
+      // Execute scripts if needed
+      if (ULTRA_SPA_CONFIG.selectors.updateScripts && pageData.scripts) {
+        this.executeScripts(pageData.scripts);
+      }
+      
+      // Restore focus if enabled
+      if (ULTRA_SPA_CONFIG.navigation.focusRestoration && this.activeElement) {
+        try {
+          // Try to find a similar element on the new page
+          const tagName = this.activeElement.tagName;
+          const id = this.activeElement.id;
+          const className = this.activeElement.className;
+          
+          let similarElement = null;
+          
+          if (id) {
+            similarElement = document.getElementById(id);
+          }
+          
+          if (!similarElement && className) {
+            similarElement = document.querySelector(`${tagName}.${className.replace(/\s+/g, '.')}`);
+          }
+          
+          if (similarElement) {
+            similarElement.focus();
+          } else {
+            // Focus on content area as fallback
+            contentElement.setAttribute('tabindex', '-1');
+            contentElement.focus();
+            contentElement.removeAttribute('tabindex');
+          }
+        } catch (e) {
+          Monitor.debug('Error restoring focus', e);
+        }
+      }
+      
+      // Announce page change for accessibility
+      UIManager.announcePageChange(pageData);
+      
+      // Scroll to top or restore position
+      this.handleScrollRestoration(pageData.url);
+    },
+    
+    /**
+     * Handle scroll restoration
+     */
+    handleScrollRestoration(url) {
+      if (!ULTRA_SPA_CONFIG.navigation.scrollRestoration) {
+        window.scrollTo(0, 0);
+        return;
+      }
+      
+      // Check if we have a stored position for this URL (for back/forward navigation)
+      const storedPosition = this.scrollPositions.get(url);
+      
+      if (storedPosition) {
+        window.scrollTo(storedPosition.x, storedPosition.y);
+      } else {
+        window.scrollTo(0, 0);
+      }
+    },
+    
+    /**
+     * Execute scripts from the new page
+     */
+    executeScripts(scripts) {
+      scripts.forEach(scriptContent => {
+        try {
+          const script = document.createElement('script');
+          script.textContent = scriptContent;
+          document.head.appendChild(script);
+          document.head.removeChild(script);
+        } catch (error) {
+          Monitor.error('Error executing script', error);
+        }
+      });
+    },
+    
+    /**
+     * Update head elements
+     */
+          updateHeadElements(headElements) {
+        for (const [selector, elements] of Object.entries(headElements)) {
+          // Remove existing elements
+          document.querySelectorAll(selector).forEach(el => {
+            el.parentNode.removeChild(el);
+          });
+          
+          // Add new elements
+          elements.forEach(html => {
+            const div = document.createElement('div');
+            div.innerHTML = html;
+            const element = div.firstChild;
+            document.head.appendChild(element);
+          });
+        }
+      },
+      
+      /**
+       * Handle popstate (back/forward navigation)
+       */
+      handlePopState(event) {
+        if (event.state && event.state.url) {
+          this.navigateTo(event.state.url);
+        }
+      },
+      
+      /**
+       * Setup links on newly loaded page
+       */
+      setupNewPageLinks() {
+        // Prefetch priority links
+        PrefetchManager.prefetchLinks({ priority: true });
+        
+        // Prefetch regular links with delay
+        setTimeout(() => {
+          PrefetchManager.prefetchLinks();
+        }, 500);
+        
+        // Setup lazy prefetch if enabled
+        if (ULTRA_SPA_CONFIG.prefetch.prefetchOnVisible) {
+          PrefetchManager.initLazyPrefetch();
+        }
+      }
+    };
+
+  /**
+   * Main UltraSPA Class
+   */
+  class UltraSPA {
+    constructor(config = {}) {
+      // Apply custom config
+      this.applyConfig(config);
+      
+      // Initialization state
+      this.initialized = false;
+      
+      // Bind public methods
+      this.navigate = this.navigate.bind(this);
+      this.prefetch = this.prefetch.bind(this);
+      this.clearCache = this.clearCache.bind(this);
+      this.getStats = this.getStats.bind(this);
+    }
+    
+    /**
+     * Apply custom configuration
+     */
+    applyConfig(config) {
+      // Deep merge config
+      const mergeConfig = (target, source) => {
+        for (const key in source) {
+          if (source[key] instanceof Object && key in target) {
+            mergeConfig(target[key], source[key]);
+          } else {
+            target[key] = source[key];
+          }
+        }
+      };
+      
+      mergeConfig(ULTRA_SPA_CONFIG, config);
+    }
+    
+    /**
+     * Initialize UltraSPA
+     */
+    async init() {
+      if (!ULTRA_SPA_CONFIG.enabled) {
+        return;
+      }
+      
+      Monitor.info('Initializing UltraSPA', { version: '1.0.0' });
+      
+      try {
+        // Initialize cache
+        await CacheManager.init();
+        
+        // Initialize UI components
+        UIManager.init();
+        
+        // Initialize navigation
+        NavigationManager.init();
+        
+        // Initialize hover prefetch
+        PrefetchManager.initHoverPrefetch();
+        
+        // Register service worker if enabled
+        if (ULTRA_SPA_CONFIG.serviceWorker.enabled) {
+          await ServiceWorkerManager.register();
+        }
+        
+        // Prefetch priority links
+        PrefetchManager.prefetchLinks({ priority: true });
+        
+        // Prefetch regular links after a delay
+        setTimeout(() => {
+          PrefetchManager.prefetchLinks();
+        }, 1000);
+        
+        // Initialize lazy prefetch if enabled
+        if (ULTRA_SPA_CONFIG.prefetch.prefetchOnVisible) {
+          PrefetchManager.initLazyPrefetch();
+        }
+        
+        // Set up periodic service worker updates
+        if (ULTRA_SPA_CONFIG.serviceWorker.enabled && 
+            ULTRA_SPA_CONFIG.serviceWorker.updateInterval > 0) {
+          setInterval(() => {
+            ServiceWorkerManager.update();
+          }, ULTRA_SPA_CONFIG.serviceWorker.updateInterval);
+        }
+        
+        this.initialized = true;
+        Monitor.info('UltraSPA initialized successfully');
+        
+        // Dispatch init event
+        window.dispatchEvent(new CustomEvent('ultraSpaInitialized'));
+        
+        return true;
+      } catch (error) {
+        Monitor.error('Initialization failed', error);
+        return false;
+      }
+    }
+    
+    /**
+     * Public: Navigate to URL
+     */
+    navigate(url) {
+      if (!this.initialized || !ULTRA_SPA_CONFIG.navigation.enabled) {
+        window.location.href = url;
+        return;
+      }
+      
+      return NavigationManager.navigateTo(url);
+    }
+    
+    /**
+     * Public: Manually prefetch URL
+     */
+    prefetch(url, priority = false) {
+      if (!this.initialized) return;
+      
+      return PrefetchManager.prefetch(url, priority);
+    }
+    
+    /**
+     * Public: Clear cache
+     */
+    async clearCache() {
+      if (!this.initialized) return;
+      
+      try {
+        await CacheManager.cleanup();
+        return true;
+      } catch (error) {
+        Monitor.error('Error clearing cache', error);
+        return false;
+      }
+    }
+    
+    /**
+     * Public: Get stats
+     */
+    async getStats() {
+      const stats = {
+        initialized: this.initialized,
+        serviceWorker: !!navigator.serviceWorker.controller,
+        performance: Monitor.getPerformanceReport(),
+        network: NetworkManager.getStats()
+      };
+      
+      // Add database stats if available
+      if (ULTRA_SPA_CONFIG.db.enabled) {
+        try {
+          stats.database = await DBManager.getStats();
+        } catch (error) {
+          stats.database = { error: error.message };
+        }
+      }
+      
+      return stats;
+    }
+    
+    /**
+     * Public: Update configuration
+     */
+    updateConfig(config) {
+      this.applyConfig(config);
+      return ULTRA_SPA_CONFIG;
+    }
+  }
+
+  // Create global instance
+  window.UltraSPA = new UltraSPA();
+  
+  // Auto-initialize if enabled
+  if (document.readyState === 'complete') {
+    window.UltraSPA.init();
+  } else {
+    window.addEventListener('load', () => {
+      window.UltraSPA.init();
+    });
+  }
+  
+  /**
+   * Service Worker template (to be saved as a separate file)
+   * This is just a template that should be saved to the path specified in serviceWorker.path
+   */
+  const serviceWorkerTemplate = `
+    // UltraSPA Service Worker
+    const CACHE_NAME = 'ultra-spa-cache-v1';
+    const RUNTIME_CACHE = 'ultra-spa-runtime';
+    
+    // Assets to cache on install
+    const PRECACHE_ASSETS = [
+      '/',
+      '/index.html',
+      '/styles/main.css',
+      '/scripts/main.js',
+      // Add your important assets here
+    ];
+    
+    // Installation
+    self.addEventListener('install', (event) => {
+      event.waitUntil(
+        caches.open(CACHE_NAME)
+          .then((cache) => cache.addAll(PRECACHE_ASSETS))
+          .then(() => self.skipWaiting())
+      );
+    });
+    
+    // Activation - clean old caches
+    self.addEventListener('activate', (event) => {
+      const currentCaches = [CACHE_NAME, RUNTIME_CACHE];
+      event.waitUntil(
+        caches.keys().then((cacheNames) => {
+          return cacheNames.filter((cacheName) => !currentCaches.includes(cacheName));
+        }).then((cachesToDelete) => {
+          return Promise.all(cachesToDelete.map((cacheToDelete) => {
+            return caches.delete(cacheToDelete);
+          }));
+        }).then(() => self.clients.claim())
+      );
+    });
+    
+    // Helper function to determine request type
+    function getRequestType(request) {
+      const url = new URL(request.url);
+      
+      if (request.headers.get('X-Requested-With') === 'UltraSPA') {
+        return 'prefetch';
+      }
+      
+      if (request.mode === 'navigate') {
+        return 'navigation';
+      }
+      
+      if (url.pathname.match(/\\.(js|css|jpg|jpeg|png|gif|svg|webp|ico|woff|woff2|ttf|eot)$/)) {
+        return 'asset';
+      }
+      
+      return 'other';
+    }
+    
+    // Fetch event
+    self.addEventListener('fetch', (event) => {
+      // Skip cross-origin requests
+      if (!event.request.url.startsWith(self.location.origin)) {
+        return;
+      }
+      
+      const requestType = getRequestType(event.request);
+      let fetchStrategy;
+      
+      switch (requestType) {
+        case 'navigation':
+          fetchStrategy = 'network-first';
+          break;
+        case 'prefetch':
+          fetchStrategy = 'cache-first';
+          break;
+        case 'asset':
+          fetchStrategy = 'cache-first';
+          break;
+        default:
+          fetchStrategy = 'network-first';
+      }
+      
+      if (fetchStrategy === 'network-first') {
+        event.respondWith(
+          fetch(event.request)
+            .then((response) => {
+              // Cache the response
+              if (response.status === 200) {
+                const responseToCache = response.clone();
+                caches.open(RUNTIME_CACHE).then((cache) => {
+                  cache.put(event.request, responseToCache);
+                });
+              }
+              return response;
+            })
+            .catch(() => {
+              // Fallback to cache
+              return caches.match(event.request);
+            })
+        );
+      } else if (fetchStrategy === 'cache-first') {
+        event.respondWith(
+          caches.match(event.request)
+            .then((cachedResponse) => {
+              if (cachedResponse) {
+                return cachedResponse;
+              }
+              
+              // Not in cache, get from network
+              return fetch(event.request)
+                .then((response) => {
+                  // Cache the response
+                  if (response.status === 200) {
+                    const responseToCache = response.clone();
+                    caches.open(RUNTIME_CACHE).then((cache) => {
+                      cache.put(event.request, responseToCache);
+                    });
+                  }
+                  return response;
+                });
+            })
+        );
+      }
+    });
+    
+    // Handle messages from clients
+    self.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'SKIP_WAITING') {
+        self.skipWaiting();
+      }
+    });
+  `;
+  
+  /**
+   * Export serviceWorkerTemplate for usage in setup scripts
+   */
+  window.UltraSPA.serviceWorkerTemplate = serviceWorkerTemplate;
+  
+})();
