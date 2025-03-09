@@ -867,7 +867,7 @@
     /**
      * Set version for a URL
      */
-    setVersion: async function(url, content) {
+    async setVersion: function(url, content) {
       const hash = await Utils.generateHash(content);
       this.versions.set(url, {
         hash,
